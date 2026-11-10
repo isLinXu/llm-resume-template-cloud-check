@@ -95,42 +95,47 @@ jobs:
 
       - name: Verify builds
         run: |
-          set -euo pipefail
-          cd latex_resume_pro
-          echo "## Build Verification" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          EXPECTED=(
-            resume-pro-zh.pdf
-            quickstart.pdf
-            themes-preview.pdf
-            variants/pdf/variant-academic.pdf
-            variants/pdf/variant-academic-long.pdf
-            variants/pdf/variant-product.pdf
-            variants/pdf/variant-blackpro.pdf
-            variants/pdf/variant-minimalist.pdf
-            variants/pdf/variant-onepage.pdf
-            variants/pdf/variant-english.pdf
-            variants/pdf/variant-purple.pdf
-            variants/pdf/variant-twocolumn.pdf
-            variants/pdf/variant-coverletter.pdf
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path("latex_resume_pro")
+          expected = (
+              "resume-pro-zh.pdf",
+              "quickstart.pdf",
+              "themes-preview.pdf",
+              "variants/pdf/variant-academic.pdf",
+              "variants/pdf/variant-academic-long.pdf",
+              "variants/pdf/variant-product.pdf",
+              "variants/pdf/variant-blackpro.pdf",
+              "variants/pdf/variant-minimalist.pdf",
+              "variants/pdf/variant-onepage.pdf",
+              "variants/pdf/variant-english.pdf",
+              "variants/pdf/variant-purple.pdf",
+              "variants/pdf/variant-twocolumn.pdf",
+              "variants/pdf/variant-coverletter.pdf",
           )
-          MISSING=0
-          for f in "${EXPECTED[@]}"; do
-            if [ -s "$f" ]; then
-              SIZE=$(stat -c%s "$f")
-              echo "✅ $f ($SIZE bytes)" | tee -a "$GITHUB_STEP_SUMMARY"
-            else
-              echo "❌ $f — MISSING OR EMPTY" | tee -a "$GITHUB_STEP_SUMMARY"
-              MISSING=$((MISSING+1))
-            fi
-          done
-          if [ "$MISSING" -gt 0 ]; then
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "❌ $MISSING expected PDFs are missing or empty." >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ All 13 expected PDFs are present and non-empty." >> "$GITHUB_STEP_SUMMARY"
+          lines = ["## Build Verification", ""]
+          missing = []
+          for name in expected:
+              path = root / name
+              if path.is_file() and path.stat().st_size > 0:
+                  line = f"✅ {name} ({path.stat().st_size} bytes)"
+              else:
+                  line = f"❌ {name} — MISSING OR EMPTY"
+                  missing.append(name)
+              print(line)
+              lines.append(line)
+          lines.append("")
+          if missing:
+              lines.append(f"❌ {len(missing)} expected PDFs are missing or empty: {', '.join(missing)}")
+          else:
+              lines.append("✅ All 13 expected PDFs are present and non-empty.")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          if missing:
+              raise SystemExit(1)
+          PY
 
       - name: Collect PDFs
         run: |

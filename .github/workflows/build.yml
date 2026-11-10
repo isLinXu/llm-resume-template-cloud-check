@@ -1,0 +1,240 @@
+name: Build Resume PDFs
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+    paths:
+      - 'latex_resume_pro/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    timeout-minutes: 30
+    container:
+      image: danteev/texlive:latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache TeX auxiliary files
+        uses: actions/cache@v4
+        with:
+          path: |
+            latex_resume_pro/*.aux
+            latex_resume_pro/*.log
+            latex_resume_pro/*.out
+            latex_resume_pro/*.fls
+            latex_resume_pro/*.fdb_latexmk
+            latex_resume_pro/*.synctex.gz
+          key: tex-build-${{ hashFiles('latex_resume_pro/**/*.tex', 'latex_resume_pro/**/*.cls') }}
+          restore-keys: tex-build-
+
+      - name: Generate placeholder logos (if missing)
+        run: |
+          cd latex_resume_pro/logos
+          # Skip if logo PNGs already exist in the repo
+          if ls *.png >/dev/null 2>&1 && [ "$(ls *.png | wc -l)" -gt 5 ]; then
+            echo "Logo PNGs already present ($(ls *.png | wc -l) files), skipping generation"
+          else
+            echo "Logos missing, attempting generation..."
+            python3 -m pip install --quiet Pillow 2>/dev/null || pip3 install --quiet Pillow 2>/dev/null || true
+            python3 build_placeholders.py --svg 2>/dev/null || echo "WARNING: Logo generation failed, continuing anyway"
+          fi
+
+      - name: Lint LaTeX files
+        continue-on-error: true
+        run: |
+          cd latex_resume_pro
+          for f in *.tex modules/*.tex modules-en/*.tex; do
+            chktex -q -n2 -n24 -n13 "$f" 2>/dev/null || true
+          done
+
+      - name: Build main resume
+        run: |
+          set -euo pipefail
+          cd latex_resume_pro
+          rm -f resume-pro-zh.pdf
+          xelatex -interaction=nonstopmode -halt-on-error -file-line-error resume-pro-zh.tex
+          xelatex -interaction=nonstopmode -halt-on-error -file-line-error resume-pro-zh.tex
+
+      - name: Build quickstart example
+        run: |
+          set -euo pipefail
+          cd latex_resume_pro
+          rm -f quickstart.pdf
+          xelatex -interaction=nonstopmode -halt-on-error -file-line-error quickstart.tex
+          xelatex -interaction=nonstopmode -halt-on-error -file-line-error quickstart.tex
+
+      - name: Build themes preview
+        run: |
+          set -euo pipefail
+          cd latex_resume_pro
+          rm -f themes-preview.pdf
+          xelatex -interaction=nonstopmode -halt-on-error -file-line-error themes-preview.tex
+          xelatex -interaction=nonstopmode -halt-on-error -file-line-error themes-preview.tex
+
+      - name: Build all variants
+        run: |
+          set -euo pipefail
+          cd latex_resume_pro
+          bash variants/build_variants.sh
+
+      - name: Verify builds
+        run: |
+          set -euo pipefail
+          cd latex_resume_pro
+          echo "## Build Verification" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          EXPECTED=(
+            resume-pro-zh.pdf
+            quickstart.pdf
+            themes-preview.pdf
+            variants/pdf/variant-academic.pdf
+            variants/pdf/variant-academic-long.pdf
+            variants/pdf/variant-product.pdf
+            variants/pdf/variant-blackpro.pdf
+            variants/pdf/variant-minimalist.pdf
+            variants/pdf/variant-onepage.pdf
+            variants/pdf/variant-english.pdf
+            variants/pdf/variant-purple.pdf
+            variants/pdf/variant-twocolumn.pdf
+            variants/pdf/variant-coverletter.pdf
+          )
+          MISSING=0
+          for f in "${EXPECTED[@]}"; do
+            if [ -s "$f" ]; then
+              echo "✅ $f ($(du -h "$f" | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "❌ $f — MISSING OR EMPTY" >> "$GITHUB_STEP_SUMMARY"
+              MISSING=$((MISSING+1))
+            fi
+          done
+          if [ "$MISSING" -gt 0 ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ $MISSING expected PDFs are missing or empty." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ All 13 expected PDFs are present and non-empty." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect PDFs
+        run: |
+          mkdir -p output
+          cp latex_resume_pro/resume-pro-zh.pdf output/
+          cp latex_resume_pro/quickstart.pdf output/
+          cp latex_resume_pro/themes-preview.pdf output/
+          if [ -d latex_resume_pro/variants/pdf ]; then
+            cp latex_resume_pro/variants/pdf/*.pdf output/ 2>/dev/null || true
+          fi
+
+      - name: Upload PDF artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: resume-pdfs
+          path: output/
+          retention-days: 30
+
+      - name: Comment PR with build results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const outputDir = 'output';
+            const files = fs.readdirSync(outputDir).filter(f => f.endsWith('.pdf'));
+            let body = '## 📄 PDF Build Results\n\n';
+            body += '| File | Size |\n|------|------|\n';
+            for (const f of files) {
+              const stat = fs.statSync(path.join(outputDir, f));
+              const sizeKB = (stat.size / 1024).toFixed(1);
+              body += `| ${f} | ${sizeKB} KB |\n`;
+            }
+            body += '\n> Download the full artifact from the workflow summary page.';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Commit PDFs to repo (main branch only)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const outputDir = 'output';
+            const files = fs.readdirSync(outputDir).filter(f => f.endsWith('.pdf'));
+            if (files.length === 0) { console.log('No PDFs to commit'); return; }
+            
+            for (const file of files) {
+              const filePath = path.join(outputDir, file);
+              const content = fs.readFileSync(filePath);
+              const base64 = content.toString('base64');
+              const targetPath = `docs/pdfs/${file}`;
+              
+              // Try to get existing file SHA for update
+              let sha = null;
+              try {
+                const { data } = await github.rest.repos.getContent({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  path: targetPath,
+                  ref: context.ref
+                });
+                sha = data.sha;
+              } catch (e) { /* file doesn't exist yet */ }
+              
+              await github.rest.repos.createOrUpdateFileContents({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: targetPath,
+                message: `ci: update ${file} [skip ci]`,
+                content: base64,
+                sha: sha,
+                branch: context.ref.replace('refs/heads/', '')
+              });
+              console.log(`✅ Updated ${targetPath}`);
+            }
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download PDF artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: resume-pdfs
+          path: output/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/*.pdf
+          generate_release_notes: true
+          draft: false
